@@ -1,0 +1,151 @@
+(function () {
+  const RUTA_INICIAL = '/catalogo';
+  const ID_RAIZ = 'app-root';
+  const raiz = document.getElementById(ID_RAIZ);
+  const scripts = {};      // url -> Promise (cada script se descarga una sola vez)
+  let montado = null;      // entrada del registro montada en este momento
+  let turno = 0;           // evita condiciones de carrera si el usuario navega rápido
+
+  // 1. Descarga dinámica del bundle de un micro frontend
+  function cargarScript(url) {
+    if (!scripts[url]) {
+      scripts[url] = new Promise(function (resolve, reject) {
+        const inicio = performance.now();
+
+        const s = document.createElement('script');
+        s.src = url + '?v=' + Date.now();
+
+        s.onload = function () {
+          const fin = performance.now();
+          const tiempo = fin - inicio;
+
+          console.log(
+            '[Observabilidad] MFE cargado: ' +
+            url +
+            ' en ' +
+            tiempo.toFixed(2) +
+            ' ms'
+          );
+
+          resolve();
+        };
+
+        s.onerror = function () {
+          const fin = performance.now();
+          const tiempo = fin - inicio;
+
+          console.error(
+            '[Observabilidad] Error cargando MFE: ' +
+            url +
+            ' después de ' +
+            tiempo.toFixed(2) +
+            ' ms'
+          );
+
+          delete scripts[url];
+          reject(new Error('No se pudo cargar ' + url));
+        };
+
+        document.head.appendChild(s);
+      });
+    }
+
+    return scripts[url];
+  }
+
+  // 2. Contrato de montaje / desmontaje
+  function montar(entrada) {
+    if (entrada.tipo === 'funcion') {
+      window['render' + entrada.nombre](ID_RAIZ);
+    } else if (entrada.tipo === 'webcomponent') {
+      raiz.appendChild(document.createElement(entrada.etiqueta));
+    }
+    montado = entrada;
+  }
+
+  function desmontarActual() {
+    if (montado && montado.tipo === 'funcion') {
+      const desmontar = window['unmount' + montado.nombre];
+      if (typeof desmontar === 'function') desmontar(ID_RAIZ);
+    }
+    raiz.innerHTML = '';
+    montado = null;
+  }
+
+  // 3. Enrutamiento: la URL decide qué micro frontend se muestra
+  async function navegar() {
+    const miTurno = ++turno;
+    const ruta = location.hash.replace('#', '') || RUTA_INICIAL;
+    const entrada = window.REGISTRO_MFE[ruta];
+    marcarEnlaceActivo(ruta);
+    desmontarActual();
+
+    if (!entrada) {
+      raiz.innerHTML = '<p class="app-aviso">Página no encontrada.</p>';
+      return;
+    }
+    raiz.innerHTML = '<p class="app-aviso">Cargando ' + entrada.nombre + '…</p>';
+    try {
+      await cargarScript(entrada.url);
+      if (miTurno !== turno) return;   // el usuario ya navegó a otra ruta
+      raiz.innerHTML = '';
+      montar(entrada);
+    } catch (e) {
+      if (miTurno !== turno) return;
+      raiz.innerHTML =
+        '<div class="app-error">' +
+        '<p>El micro frontend <b>' + entrada.nombre +
+        '</b> no está disponible en este momento. El resto de la aplicación sigue funcionando.</p>' +
+        '<button id="btn-reintentar" type="button">Reintentar</button>' +
+        '</div>';
+
+      const btnReintentar = document.getElementById('btn-reintentar');
+
+      btnReintentar.addEventListener('click', function () {
+        delete scripts[entrada.url];
+        navegar();
+      });
+
+      console.error(e);
+    }
+  }
+
+  function marcarEnlaceActivo(ruta) {
+    document.querySelectorAll('.app-nav a').forEach(function (a) {
+      a.classList.toggle('activo', a.dataset.ruta === ruta);
+    });
+  }
+
+  // 4. Comunicación: el contenedor solo ESCUCHA eventos públicos
+  window.addEventListener('carrito:actualizado', function (e) {
+    document.getElementById('app-contador').textContent = e.detail.cantidad;
+  });
+  window.addEventListener('usuario:cambio', function (e) {
+    document.getElementById('app-saludo').textContent = 'Hola, ' + e.detail.nombre;
+  });
+  window.addEventListener('pedido:estado', function (e) {
+    const notificacion = document.createElement('div');
+    notificacion.textContent = 'Pedido ' + e.detail.id + ' está: ' + e.detail.estado;
+    notificacion.style.position = 'fixed';
+    notificacion.style.bottom = '20px';
+    notificacion.style.right = '20px';
+    notificacion.style.background = 'var(--color-primary)';
+    notificacion.style.color = 'var(--color-white)';
+    notificacion.style.padding = '10px 20px';
+    notificacion.style.borderRadius = 'var(--radius-sm)';
+    notificacion.style.boxShadow = '0 2px 5px rgba(0,0,0,0.2)';
+    notificacion.style.zIndex = '9999';
+    document.body.appendChild(notificacion);
+    setTimeout(function () {
+      notificacion.remove();
+    }, 3000);
+  });
+
+  // 5. Arranque: precargar los micro frontends que lo requieran y navegar
+  Object.values(window.REGISTRO_MFE)
+    .filter(function (m) { return m.precargar; })
+    .forEach(function (m) { cargarScript(m.url).catch(console.error); });
+
+  window.addEventListener('hashchange', navegar);
+  navegar();
+})();
